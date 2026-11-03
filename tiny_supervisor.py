@@ -13,6 +13,13 @@ class Supervisor:
         self.process: Optional[subprocess.Popen] = None
         self.running = False
         self._lock = threading.Lock()
+        # Observability: the number of times a child has been launched, and
+        # the pids it has run under. Without these the restart behaviour is
+        # invisible: the whole restart cycle can finish between two samples
+        # of the current process, so a test cannot tell a restart happened
+        # from a single launch.
+        self.restart_count = 0
+        self.restart_history: List[int] = []
 
     def _monitor(self):
         count = 0
@@ -20,7 +27,9 @@ class Supervisor:
             print(f"[Supervisor] Starting: {' '.join(self.command)} (Attempt {count+1})")
             with self._lock:
                 self.process = subprocess.Popen(self.command)
-            
+                self.restart_count += 1
+                self.restart_history.append(self.process.pid)
+
             self.process.wait()
             
             if not self.running:

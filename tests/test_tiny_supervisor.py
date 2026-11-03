@@ -66,22 +66,41 @@ class TestLifecycle(unittest.TestCase):
 class TestRestarts(unittest.TestCase):
     def test_process_is_restarted_after_exit(self):
         # Exits immediately with code 3, so it should be relaunched.
+        #
+        # Assert on restart_count, not on the current pid. A polling loop
+        # looking for a changed pid races with the supervisor: with delay=0
+        # the whole cycle of launches can finish between two samples, so the
+        # test would report "never restarted" even though it was.
         sup = Supervisor(_py("import sys; sys.exit(3)"), restarts=2, delay=0)
         sup.start()
         try:
-            deadline = time.time() + 10
-            first_pid = None
-            second_pid = None
-            while time.time() < deadline:
-                if sup.process is not None:
-                    if first_pid is None:
-                        first_pid = sup.process.pid
-                    elif sup.process.pid != first_pid:
-                        second_pid = sup.process.pid
-                        break
+            deadline = time.time() + 15
+            while sup.restart_count < 2 and time.time() < deadline:
                 time.sleep(0.02)
-            self.assertIsNotNone(first_pid, "process never started")
-            self.assertIsNotNone(second_pid, "process was never restarted")
+            self.assertGreaterEqual(
+                sup.restart_count, 2, "process was never restarted"
+            )
+            self.assertGreaterEqual(
+                len(set(sup.restart_history)), 2, "restart reused the same pid"
+            )
+        finally:
+            sup.stop()
+
+    def test_restart_count_starts_at_zero(self):
+        sup = Supervisor(_py("import sys; sys.exit(0)"))
+        self.assertEqual(sup.restart_count, 0)
+        self.assertEqual(sup.restart_history, [])
+
+    def test_restart_count_matches_launches(self):
+        sup = Supervisor(_py("import sys; sys.exit(1)"), restarts=2, delay=0)
+        sup.start()
+        try:
+            deadline = time.time() + 15
+            while sup.running and time.time() < deadline:
+                time.sleep(0.02)
+            # restarts=2 means one initial launch plus two restarts.
+            self.assertEqual(sup.restart_count, 3)
+            self.assertEqual(len(sup.restart_history), 3)
         finally:
             sup.stop()
 
