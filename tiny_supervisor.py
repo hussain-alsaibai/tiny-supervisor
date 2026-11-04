@@ -20,15 +20,37 @@ class Supervisor:
         # from a single launch.
         self.restart_count = 0
         self.restart_history: List[int] = []
+        # Set when the monitor dies from an unexpected error. Without it the
+        # thread evaporates, ``running`` stays True, and a caller polling the
+        # flag is told the service is up when it never started.
+        self.last_error: Optional[BaseException] = None
+        self._thread: Optional[threading.Thread] = None
 
     def _monitor(self):
+        try:
+            self._monitor_loop()
+        except BaseException as exc:  # noqa: BLE001 - must not vanish silently
+            self.last_error = exc
+            raise
+        finally:
+            self.running = False
+
+    def _monitor_loop(self):
         count = 0
         while self.running and count <= self.restarts:
             print(f"[Supervisor] Starting: {' '.join(self.command)} (Attempt {count+1})")
-            with self._lock:
-                self.process = subprocess.Popen(self.command)
-                self.restart_count += 1
-                self.restart_history.append(self.process.pid)
+            try:
+                with self._lock:
+                    self.process = subprocess.Popen(self.command)
+                    self.restart_count += 1
+                    self.restart_history.append(self.process.pid)
+            except OSError as exc:
+                # Retrying cannot help, and dying quietly leaves the caller
+                # believing the supervisor is alive.
+                print(f"[Supervisor] Failed to start {self.command!r}: {exc}")
+                self.last_error = exc
+                self.running = False
+                return
 
             self.process.wait()
             
@@ -46,7 +68,13 @@ class Supervisor:
         self.running = False
 
     def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            # A second start() used to spawn a second monitor that stop() had
+            # no handle on: it kept restarting the command forever while both
+            # threads raced over self.process.
+            raise RuntimeError("Supervisor is already running")
         self.running = True
+        self.last_error = None
         self._thread = threading.Thread(target=self._monitor, daemon=True)
         self._thread.start()
 
